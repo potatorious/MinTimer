@@ -412,7 +412,7 @@ class SoundDialog:
         self.device = self.playing = self.poll_id = None
         self.window = window = tk.Toplevel(owner.root)
         window.withdraw()
-        window.title("소리 설정 · Mini Timer")
+        window.title(f"소리 설정 · {APP_NAME}")
         window.iconbitmap(default=str(ICON))
         window.transient(owner.root)
         window.attributes("-topmost", owner.pinned.get())
@@ -613,5 +613,5 @@ def main():
             (settings.DATA / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
         except OSError:
             pass
-        user.MessageBoxW(None, "Mini Timer를 열지 못했습니다. MiniTimerPython 폴더의 error.log를 확인해 주세요.",
-                         "Mini Timer", 0x10)
+        user.MessageBoxW(None, f"{APP_NAME}를 열지 못했습니다. {settings.DATA.name} 폴더의 error.log를 확인해 주세요.",
+                         APP_NAME, 0x10)

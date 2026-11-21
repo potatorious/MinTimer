@@ -7,8 +7,8 @@ from subprocess import list2cmdline
 import sys
 from uuid import UUID
 
-APP_ID = "Potatorious.MiniTimer"
-APP_NAME = "Mini Timer"
+APP_ID = "Potatorious.MinTimer"
+APP_NAME = "MinTimer"
 CLSCTX_INPROC_SERVER = 1
 RPC_E_CHANGED_MODE = -2147417850
 VT_EMPTY, VT_LPWSTR = 0, 31
@@ -57,7 +57,7 @@ def relaunch_command(icon):
     executable = Path(sys.executable)
     windowed = executable.with_name("pythonw.exe")
     launcher = windowed if windowed.is_file() else executable
-    return list2cmdline([str(launcher), str(icon.parents[1] / "MiniTimer.pyw")])
+    return list2cmdline([str(launcher), str(icon.parents[1] / "MinTimer.pyw")])
 
 
 class TaskbarTab:

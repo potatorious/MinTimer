@@ -7,7 +7,8 @@ from tempfile import NamedTemporaryFile
 import xml.etree.ElementTree as xml
 
 LOCAL = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-DATA = LOCAL / "MiniTimerPython"
+DATA = LOCAL / "MinTimer"
+PREVIOUS = LOCAL / "MiniTimerPython"
 ORIGINAL = LOCAL / "MiniTimer"
 CHANNELS = ("Seconds", "Minutes", "Hours")
 MAX_VOLUME = 200
@@ -21,8 +22,11 @@ class Channel:
 
 
 def existing(name):
-    path = DATA / name
-    return path if path.exists() else ORIGINAL / name
+    for folder in (DATA, PREVIOUS):
+        path = folder / name
+        if path.exists():
+            return path
+    return ORIGINAL / name
 
 
 def load_window(default):

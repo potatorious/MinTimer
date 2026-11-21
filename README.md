@@ -1,8 +1,8 @@
-# Mini Timer
+# MinTimer
 
 항상 위에 띄워 쓰는 **164 × 28 픽셀 Windows 스톱워치**입니다. 화면 한쪽에 두고 다른 일을 하면서 시간을 잴 수 있어요. ㅇㅅㅇ
 
-![Mini Timer 미리보기](assets/preview.png)
+![MinTimer 미리보기](assets/preview.png)
 
 - ▶로 시작·일시정지, ↻로 초기화. 숫자 부분을 끌어서 이동할 수 있어요.
 - 우클릭으로 항상 위 표시와 크기(100%, 125%, 150%, 200%)를 바꿀 수 있어요.
@@ -11,9 +11,9 @@
 ## 실행
 
 1. Windows에 Tkinter가 포함된 [Python 3.12 이상](https://www.python.org/downloads/windows/)을 설치합니다.
-2. 이 저장소를 내려받아 압축을 푼 뒤 `MiniTimer.pyw`를 더블클릭합니다. 터미널에서는 폴더를 열고 `pythonw MiniTimer.pyw`로 실행할 수 있어요.
+2. 이 저장소를 내려받아 압축을 푼 뒤 `MinTimer.pyw`를 더블클릭합니다. 터미널에서는 폴더를 열고 `pythonw MinTimer.pyw`로 실행할 수 있어요.
 3. **우클릭 → 소리 설정…**에서 알림을 고릅니다. 기본음과 44.1 kHz 모노 16비트 WAV는 바로 재생할 수 있어요. MP3, WMA, 다른 WAV 형식은 같은 Python에 `python -m pip install av`를 실행해 PyAV를 설치하면 됩니다.
 
-단축키는 `Space` 시작·일시정지, `R` 초기화, `Esc` 종료예요. 설정은 `%LOCALAPPDATA%\MiniTimerPython`에 저장합니다.
+단축키는 `Space` 시작·일시정지, `R` 초기화, `Esc` 종료예요. 설정은 `%LOCALAPPDATA%\MinTimer`에 저장하며, 새 설정 파일이 아직 없으면 이전 버전의 설정을 읽어요.
 
 아이콘의 출처와 라이선스는 [외부 구성 요소 안내](assets/THIRD_PARTY_NOTICES.md)에 있습니다.
