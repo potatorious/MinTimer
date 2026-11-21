@@ -10,6 +10,7 @@ LOCAL = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
 DATA = LOCAL / "MiniTimerPython"
 ORIGINAL = LOCAL / "MiniTimer"
 CHANNELS = ("Seconds", "Minutes", "Hours")
+MAX_VOLUME = 200
 
 
 @dataclass
@@ -29,20 +30,16 @@ def load_window(default):
         x, y, zoom, pinned = existing("settings.txt").read_text(encoding="utf-8-sig").splitlines()
         return int(x), int(y), max(1.0, min(2.0, float(zoom))), pinned.lower() == "true"
     except (OSError, ValueError):
-        return *default, 1.0, True
+        return (*default, 1.0, True)
 
 
 def atomic_write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=path.parent, delete=False) as pending:
-        temporary = Path(pending.name)
-        try:
-            pending.write(content)
-        except BaseException:
-            pending.close()
-            temporary.unlink(missing_ok=True)
-            raise
+    pending = NamedTemporaryFile(dir=path.parent, delete=False)
+    temporary = Path(pending.name)
     try:
+        with pending:
+            pending.write(content)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -62,7 +59,7 @@ def load_sounds():
                 raise ValueError("Invalid sound settings")
             result.append(Channel(
                 node.findtext("Enabled", "false").lower() == "true",
-                max(0, min(100, int(node.findtext("Volume", "50")))),
+                max(0, min(MAX_VOLUME, int(node.findtext("Volume", "50")))),
                 node.findtext("FilePath", ""),
             ))
         return result

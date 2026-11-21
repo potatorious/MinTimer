@@ -1,6 +1,6 @@
-from copy import deepcopy
 import ctypes as c
 from ctypes import wintypes as w
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 import tkinter as tk
@@ -9,6 +9,7 @@ import traceback
 
 from . import settings
 from .audio import Clips, DEFAULT_NAMES, Mixer, RATE, WaveOutput
+from .taskbar import APP_NAME, TaskbarTab, identify_process
 
 ICON = Path(__file__).resolve().parents[1] / "assets" / "smile.ico"
 BAR = "#41413f"
@@ -20,6 +21,15 @@ BUTTON = "#3c3d41"
 TEXT = "#f0f0eb"
 YELLOW = "#ffda3d"
 FONT = "Consolas"
+DRAG_AREA, PLAY_BUTTON, RESET_BUTTON = 0, 1, 2
+
+GWL_STYLE, GWL_EXSTYLE = -16, -20
+WS_SYSMENU, WS_MINIMIZEBOX = 0x80000, 0x20000
+WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST = 0x40000, 0x80, 0x08
+HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 0x01, 0x02, 0x04
+SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x10, 0x20, 0x40
+SW_HIDE = 0
 
 user = c.WinDLL("user32")
 gdi = c.WinDLL("gdi32")
@@ -30,6 +40,12 @@ user.MoveWindow.argtypes = [w.HWND, c.c_int, c.c_int, c.c_int, c.c_int, w.BOOL]
 user.SetWindowRgn.argtypes = [w.HWND, w.HRGN, w.BOOL]
 user.GetDpiForWindow.argtypes = [w.HWND]
 user.GetDpiForWindow.restype = w.UINT
+user.GetWindowLongW.argtypes = [w.HWND, c.c_int]
+user.GetWindowLongW.restype = w.LONG
+user.SetWindowLongW.argtypes = [w.HWND, c.c_int, w.LONG]
+user.ShowWindow.argtypes = [w.HWND, c.c_int]
+user.SetWindowPos.argtypes = [w.HWND, w.HWND, c.c_int, c.c_int, c.c_int, c.c_int, w.UINT]
+user.SetForegroundWindow.argtypes = [w.HWND]
 gdi.CreateRoundRectRgn.argtypes = [c.c_int] * 6
 gdi.CreateRoundRectRgn.restype = w.HRGN
 gdi.DeleteObject.argtypes = [w.HGDIOBJ]
@@ -53,6 +69,26 @@ def work_area(x, y, width=1, height=1):
     if not user.GetMonitorInfoW(monitor, c.byref(info)):
         raise OSError("화면 위치를 확인할 수 없습니다.")
     return info.work
+
+
+def show_on_taskbar(hwnd):
+    extended = user.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    style = user.GetWindowLongW(hwnd, GWL_STYLE)
+    if extended & WS_EX_APPWINDOW and not extended & WS_EX_TOOLWINDOW and style & WS_MINIMIZEBOX:
+        return
+    # Windows detects the new taskbar style when the borderless window is shown again.
+    user.ShowWindow(hwnd, SW_HIDE)
+    user.SetWindowLongW(hwnd, GWL_EXSTYLE, (extended | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+    user.SetWindowLongW(hwnd, GWL_STYLE, style | WS_SYSMENU | WS_MINIMIZEBOX)
+    user.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                      | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW)
+
+
+def keep_above(hwnd, pinned):
+    current = bool(user.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+    if current != pinned:
+        user.SetWindowPos(hwnd, HWND_TOPMOST if pinned else HWND_NOTOPMOST, 0, 0, 0, 0,
+                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
 
 def replay_path():
@@ -109,7 +145,7 @@ class TimerWindow:
         self.last_drawing = None
         self.ui_timer = None
         self.closed = False
-        root.title("Mini Timer")
+        root.title(APP_NAME)
         root.iconbitmap(default=str(ICON))
         root.overrideredirect(True)
         root.resizable(False, False)
@@ -122,6 +158,9 @@ class TimerWindow:
         self.bar = tk.Canvas(root, highlightthickness=0, borderwidth=0, background=BAR)
         self.bar.pack(fill="both", expand=True)
         self.resize()
+        self.taskbar = TaskbarTab(self.hwnd, ICON)
+        show_on_taskbar(self.hwnd)
+        self.taskbar.register()
         self.build_menu()
         self.bar.bind("<ButtonPress-1>", self.press)
         self.bar.bind("<ButtonRelease-1>", self.release)
@@ -132,6 +171,7 @@ class TimerWindow:
         root.bind("<Key-r>", lambda _: self.reset())
         root.bind("<Key-R>", lambda _: self.reset())
         root.bind("<Escape>", lambda _: self.close())
+        root.bind("<FocusIn>", self.redirect_focus)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.tick()
 
@@ -162,6 +202,7 @@ class TimerWindow:
         self.root.update_idletasks()
         self.hwnd = user.GetAncestor(self.root.winfo_id(), 2)
         self.position(self.x, self.y, clamp=True)
+        keep_above(self.hwnd, self.pinned.get())
         diameter = round(20 * self.zoom)
         region = gdi.CreateRoundRectRgn(0, 0, self.width, self.height, diameter, diameter)
         if region and not user.SetWindowRgn(self.hwnd, region, True):
@@ -184,8 +225,14 @@ class TimerWindow:
             pass
 
     def pin(self):
-        self.root.attributes("-topmost", self.pinned.get())
+        pinned = self.pinned.get()
+        self.root.attributes("-topmost", pinned)
+        keep_above(self.hwnd, pinned)
         self.save_position()
+
+    def redirect_focus(self, event):
+        if event.widget is self.root and self.dialog is not None and self.dialog.window.winfo_exists():
+            self.dialog.reveal()
 
     def change_size(self):
         self.zoom = self.size_value.get() / 100
@@ -196,23 +243,25 @@ class TimerWindow:
         if not (0 <= event.x < self.width and 0 <= event.y < self.height):
             return None
         x = event.x / self.zoom
-        return 0 if x < 103 else 1 if x < 133 else 2
+        if x < 103:
+            return DRAG_AREA
+        return PLAY_BUTTON if x < 133 else RESET_BUTTON
 
     def press(self, event):
         self.root.focus_force()
         self.pressed = self.hit(event)
-        if self.pressed == 0:
+        if self.pressed == DRAG_AREA:
             self.drag = event.x_root, event.y_root, self.x, self.y
 
     def move(self, event):
         if self.drag is not None:
-            px, py, x, y = self.drag
-            dx, dy = event.x_root - px, event.y_root - py
+            pointer_x, pointer_y, window_x, window_y = self.drag
+            dx, dy = event.x_root - pointer_x, event.y_root - pointer_y
             if abs(dx) + abs(dy) > 3:
-                self.position(x + dx, y + dy)
+                self.position(window_x + dx, window_y + dy)
             return
         self.hover = self.hit(event)
-        self.bar.configure(cursor="fleur" if self.hover == 0 else "hand2")
+        self.bar.configure(cursor="fleur" if self.hover == DRAG_AREA else "hand2")
         self.draw()
 
     def leave(self, _):
@@ -226,9 +275,9 @@ class TimerWindow:
             self.position(self.x, self.y, clamp=True)
             self.save_position()
         elif pressed == self.hit(event):
-            if pressed == 1:
+            if pressed == PLAY_BUTTON:
                 self.toggle()
-            elif pressed == 2:
+            elif pressed == RESET_BUTTON:
                 self.reset()
 
     def elapsed(self):
@@ -287,7 +336,7 @@ class TimerWindow:
 
     def edit_sounds(self):
         if self.dialog is not None:
-            self.dialog.window.lift()
+            self.dialog.reveal()
             return
         if self.started is not None:
             self.base, self.started = self.elapsed(), perf_counter()
@@ -311,22 +360,25 @@ class TimerWindow:
             return
         self.last_drawing = state
         self.bar.delete("all")
-        z = self.zoom
-        if self.hover in (1, 2):
-            x = 103 if self.hover == 1 else 134
+        zoom = self.zoom
+        if self.hover in (PLAY_BUTTON, RESET_BUTTON):
+            x = 103 if self.hover == PLAY_BUTTON else 134
             rounded = (x, 8, x, 2, x + 6, 2, x + 22, 2, x + 28, 2, x + 28, 8,
                        x + 28, 20, x + 28, 26, x + 22, 26, x + 6, 26, x, 26, x, 20)
-            self.bar.create_polygon([p * z for p in rounded], smooth=True, fill=HOVER)
-        self.bar.create_text(8 * z, 14 * z, text=text, anchor="w", fill=INK,
-                             font=(FONT, -round((16 if len(text) > 8 else 18) * z)))
+            self.bar.create_polygon([p * zoom for p in rounded], smooth=True, fill=HOVER)
+        self.bar.create_text(8 * zoom, 14 * zoom, text=text, anchor="w", fill=INK,
+                             font=(FONT, -round((16 if len(text) > 8 else 18) * zoom)))
         if playing:
             for x in (111, 118):
-                self.bar.create_rectangle(x*z, 8*z, (x+3)*z, 20*z, outline="", fill=INK)
+                self.bar.create_rectangle(x * zoom, 8 * zoom, (x + 3) * zoom, 20 * zoom,
+                                          outline="", fill=INK)
         else:
-            self.bar.create_polygon([p * z for p in (112, 7, 112, 21, 123, 14)], fill=INK)
-        self.bar.create_polygon([coordinate * z for point in REPLAY for coordinate in point], fill=INK)
+            self.bar.create_polygon([p * zoom for p in (112, 7, 112, 21, 123, 14)], fill=INK)
+        self.bar.create_polygon([coordinate * zoom for point in REPLAY for coordinate in point], fill=INK)
 
     def tick(self):
+        if self.pinned.get():
+            keep_above(self.hwnd, True)
         self.draw()
         self.ui_timer = self.root.after(16, self.tick)
 
@@ -338,13 +390,25 @@ class TimerWindow:
             self.root.after_cancel(self.ui_timer)
         self.stop_output()
         self.save_position()
+        self.taskbar.close()
         self.root.destroy()
 
 
+@dataclass
+class SoundRow:
+    enabled: tk.BooleanVar
+    volume_text: tk.StringVar
+    file_label: tk.Label
+    preview_button: tk.Button
+
+
 class SoundDialog:
+    SLIDER_WIDTH = 230
+    SLIDER_HEIGHT = 26
+
     def __init__(self, owner):
         self.owner = owner
-        self.channels = deepcopy(owner.channels)
+        self.channels = [replace(channel) for channel in owner.channels]
         self.device = self.playing = self.poll_id = None
         self.window = window = tk.Toplevel(owner.root)
         window.withdraw()
@@ -356,28 +420,40 @@ class SoundDialog:
         window.configure(bg=DIALOG)
         self.scale = max(1, user.GetDpiForWindow(owner.hwnd) / 96)
         self.font = (FONT, -self.px(13))
-        self.rows = []
+        self.rows: list[SoundRow] = []
         self.configure_controls()
         area = work_area(owner.x, owner.y, owner.width, owner.height)
         width, height = self.px(420), self.px(296)
         window.geometry(f"{width}x{height}")
         for index, name in enumerate(("매초", "매분", "매시간")):
             self.add_row(index, name)
-        self.place(self.button(window, "취소", self.close, font=self.font), 238, 258, 82, 26)
-        self.place(self.button(window, "저장", self.save, YELLOW, DIALOG, self.font), 326, 258, 82, 26)
+        self.place(self.button(window, "취소", self.close), 238, 258, 82, 26)
+        self.place(self.button(window, "저장", self.save, YELLOW, DIALOG), 326, 258, 82, 26)
         window.bind("<Escape>", lambda _: self.close())
         window.bind("<Return>", lambda _: self.save())
         window.protocol("WM_DELETE_WINDOW", self.close)
         window.deiconify()
         window.update_idletasks()
-        hwnd = user.GetAncestor(window.winfo_id(), 2)
+        self.hwnd = user.GetAncestor(window.winfo_id(), 2)
         outer = w.RECT()
-        user.GetWindowRect(hwnd, c.byref(outer))
+        user.GetWindowRect(self.hwnd, c.byref(outer))
         outer_width, outer_height = outer.right - outer.left, outer.bottom - outer.top
-        user.MoveWindow(hwnd, (area.left + area.right - outer_width) // 2,
-                        (area.top + area.bottom - outer_height) // 2, outer_width, outer_height, True)
+        gap = self.px(8)
+        x = max(area.left, min(owner.x + owner.width - outer_width, area.right - outer_width))
+        y = owner.y + owner.height + gap
+        if y + outer_height > area.bottom:
+            y = max(area.top, owner.y - outer_height - gap)
+        user.MoveWindow(self.hwnd, x, y, outer_width, outer_height, True)
         window.grab_set()
-        window.focus_set()
+        self.reveal()
+
+    def reveal(self):
+        if self.window.state() != "normal":
+            self.window.deiconify()
+        keep_above(self.hwnd, self.owner.pinned.get())
+        self.window.lift()
+        user.SetForegroundWindow(self.hwnd)
+        self.window.focus_force()
 
     def px(self, value):
         return round(value * self.scale)
@@ -393,12 +469,16 @@ class SoundDialog:
         style.configure("Mini.TCheckbutton", background=CARD, foreground=TEXT, font=self.font)
         style.map("Mini.TCheckbutton", background=[("active", CARD)], foreground=[("active", TEXT)])
         style.configure("Mini.Horizontal.TScale", background=CARD, troughcolor=CARD)
-        rail = tk.PhotoImage(master=self.window, width=self.px(2), height=self.px(4))
-        rail.put("#e4e4e1", to=(0, 0, rail.width(), rail.height()))
+        rail = tk.PhotoImage(master=self.window, width=self.px(self.SLIDER_WIDTH),
+                             height=self.px(self.SLIDER_HEIGHT))
+        rail.put("#e4e4e1", to=(0, self.px(11), rail.width(), self.px(15)))
+        marker_inset = rail.width() // 2 - self.px(2)
+        rail.put("#e63838", to=(marker_inset, 0, rail.width() - marker_inset, self.px(15)))
         thumb = tk.PhotoImage(master=self.window, width=self.px(10), height=self.px(18))
-        thumb.put("#087cc5", to=(0, 0, thumb.width(), self.px(12)))
-        for row in range(self.px(12), thumb.height()):
-            inset = (row - self.px(12)) * (thumb.width() // 2) // (thumb.height() - self.px(12))
+        tip_start = self.px(12)
+        thumb.put("#087cc5", to=(0, 0, thumb.width(), tip_start))
+        for row in range(tip_start, thumb.height()):
+            inset = (row - tip_start) * (thumb.width() // 2) // (thumb.height() - tip_start)
             thumb.put("#087cc5", to=(inset, row, thumb.width() - inset, row + 1))
         self.owner.slider_images = rail, thumb
         style.element_create("Mini.Scale.trough", "image", rail, sticky="ew")
@@ -407,8 +487,8 @@ class SoundDialog:
             ("Mini.Scale.trough", {"sticky": "ew", "children": [("Mini.Scale.slider", {"side": "left", "sticky": ""})]}),
         ])
 
-    def button(self, owner, text, action, background=BUTTON, foreground=TEXT, font=None):
-        return tk.Button(owner, text=text, command=action, font=font or self.font, bg=background, fg=foreground,
+    def button(self, owner, text, action, background=BUTTON, foreground=TEXT):
+        return tk.Button(owner, text=text, command=action, font=self.font, bg=background, fg=foreground,
                          activebackground=HOVER if background == BUTTON else "#f5cf38",
                          activeforeground=foreground, borderwidth=0, highlightthickness=0, cursor="hand2")
 
@@ -417,24 +497,25 @@ class SoundDialog:
         card = tk.Frame(self.window, bg=CARD)
         self.place(card, 12, 12 + index * 80, 396, 72)
         enabled = tk.BooleanVar(card, channel.enabled)
-        volume = tk.StringVar(card, f"{channel.volume}%")
-        file = tk.Label(card, font=self.font, bg=CARD, fg=TEXT, anchor="w")
+        volume_text = tk.StringVar(card, f"{channel.volume}%")
+        file_label = tk.Label(card, font=self.font, bg=CARD, fg=TEXT, anchor="w")
         self.place(ttk.Checkbutton(card, text=name, variable=enabled, style="Mini.TCheckbutton"), 10, 7, 92, 26)
-        slider = ttk.Scale(card, from_=0, to=100, orient="horizontal", style="Mini.Horizontal.TScale",
+        slider = ttk.Scale(card, from_=0, to=settings.MAX_VOLUME, orient="horizontal", style="Mini.Horizontal.TScale",
                            value=channel.volume, command=lambda value: self.change_volume(index, value))
-        self.place(slider, 106, 7, 230, 26)
-        self.place(tk.Label(card, textvariable=volume, font=self.font, bg=CARD, fg=TEXT, anchor="e"), 340, 7, 46, 26)
-        self.place(file, 10, 39, 112, 26)
+        self.place(slider, 106, 7, self.SLIDER_WIDTH, self.SLIDER_HEIGHT)
+        self.place(tk.Label(card, textvariable=volume_text, font=self.font, bg=CARD, fg=TEXT, anchor="e"),
+                   340, 7, 46, 26)
+        self.place(file_label, 10, 39, 112, 26)
         self.place(self.button(card, "파일 선택", lambda: self.choose(index, name)), 128, 39, 82, 26)
         self.place(self.button(card, "기본", lambda: self.set_file(index, "")), 216, 39, 82, 26)
-        listen = self.button(card, "▶", lambda: self.preview(index))
-        self.place(listen, 304, 39, 82, 26)
-        self.rows.append((enabled, volume, file, listen))
+        preview_button = self.button(card, "▶", lambda: self.preview(index))
+        self.place(preview_button, 304, 39, 82, 26)
+        self.rows.append(SoundRow(enabled, volume_text, file_label, preview_button))
         self.update_file(index)
 
     def update_file(self, index):
         name = Path(self.channels[index].path).name or DEFAULT_NAMES[index]
-        self.rows[index][2].configure(text=name if len(name) <= 14 else f"{name[:7]}…{name[-6:]}", fg=TEXT)
+        self.rows[index].file_label.configure(text=name if len(name) <= 14 else f"{name[:7]}…{name[-6:]}", fg=TEXT)
 
     def choose(self, index, name):
         path = filedialog.askopenfilename(parent=self.window, title=f"{name} 알림 음원 선택",
@@ -452,7 +533,7 @@ class SoundDialog:
         value = round(float(value))
         self.channels[index].volume = value
         if index < len(self.rows):
-            self.rows[index][1].set(f"{value}%")
+            self.rows[index].volume_text.set(f"{value}%")
         if self.device is not None:
             self.device.mixer.volumes[index] = value
 
@@ -469,14 +550,14 @@ class SoundDialog:
                 return
             clips = [None] * 3
             clips[index] = clip
-            mixer = Mixer(clips, [row.volume for row in self.channels])
+            mixer = Mixer(clips, [channel.volume for channel in self.channels])
             mixer.trigger(index)
             self.device = WaveOutput(mixer)
             self.playing = index
-            self.rows[index][3].configure(text="■")
+            self.rows[index].preview_button.configure(text="■")
             self.poll_id = self.window.after(20, self.poll, len(clip))
         except (OSError, ValueError) as error:
-            self.rows[index][2].configure(fg="#ffb582")
+            self.rows[index].file_label.configure(fg="#ffb582")
             messagebox.showinfo("음원 확인", audio_message(error), parent=self.window)
 
     def poll(self, length):
@@ -497,12 +578,12 @@ class SoundDialog:
             self.device.close()
             self.device = None
         if self.playing is not None:
-            self.rows[self.playing][3].configure(text="▶")
+            self.rows[self.playing].preview_button.configure(text="▶")
             self.playing = None
 
     def save(self):
         for index, channel in enumerate(self.channels):
-            channel.enabled = self.rows[index][0].get()
+            channel.enabled = self.rows[index].enabled.get()
             if channel.enabled and channel.path and not Path(channel.path).is_file():
                 messagebox.showinfo("음원 확인", "켜진 알림의 음원 파일이 없습니다.", parent=self.window)
                 return
@@ -521,6 +602,7 @@ class SoundDialog:
 
 def main():
     user.SetProcessDPIAware()
+    identify_process()
     try:
         root = tk.Tk()
         TimerWindow(root)

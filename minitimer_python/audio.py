@@ -10,9 +10,16 @@ import wave
 
 RATE = 44100
 FRAME_BYTES = 2
-MAX_FRAMES = RATE * 600
+MAX_SECONDS = 600
+MAX_FRAMES = RATE * MAX_SECONDS
 DEFAULT_NAMES = ("tick.wav", "ding.wav", "chime.wav")
 ANNOUNCEMENT_INTERVALS = (1, 60, 3600)
+
+WAVE_MAPPER = 0xFFFFFFFF  # Default playback device.
+CALLBACK_EVENT = 0x50000
+WAIT_FAILED = 0xFFFFFFFF
+WHDR_DONE = 1
+TIME_MS, TIME_SAMPLES, TIME_BYTES = 1, 2, 4
 
 
 class WaveFormat(c.Structure):
@@ -59,6 +66,11 @@ def checked(result):
         raise OSError(f"오디오 출력 장치를 사용할 수 없습니다. (WinMM {result})")
 
 
+def pcm16(sample):
+    # Boost quiet clips while keeping loud samples in the device's signed 16-bit range.
+    return int(max(-32768, min(32767, sample)))
+
+
 def default_tone(index):
     duration = (0.055, 0.24, 0.55)[index]
     samples = array("h")
@@ -76,10 +88,11 @@ def decode_file(path):
     if Path(path).suffix.lower() == ".wav":
         try:
             with wave.open(path, "rb") as source:
-                if source.getnframes() / source.getframerate() > 600:
+                frame_count, sample_rate = source.getnframes(), source.getframerate()
+                if frame_count / sample_rate > MAX_SECONDS:
                     raise ValueError("음원은 최대 10분까지 재생할 수 있습니다.")
-                if (source.getnchannels(), source.getsampwidth(), source.getframerate()) == (1, 2, RATE):
-                    return array("h", source.readframes(source.getnframes()))
+                if (source.getnchannels(), source.getsampwidth(), sample_rate) == (1, FRAME_BYTES, RATE):
+                    return array("h", source.readframes(frame_count))
         except (wave.Error, EOFError):
             pass
 
@@ -169,12 +182,12 @@ class Mixer:
                 part = clip[self.cursor:self.cursor + length]
                 target = self.volumes[self.voice] / 100
                 if self.gain == target:
-                    scaled = array("h", (int(sample * target) for sample in part))
+                    scaled = array("h", (pcm16(sample * target) for sample in part))
                 else:
                     scaled = array("h")
                     for sample in part:
                         self.gain += max(-1 / 220, min(1 / 220, target - self.gain))
-                        scaled.append(int(sample * self.gain))
+                        scaled.append(pcm16(sample * self.gain))
                 block[out:out + len(scaled)] = scaled
                 self.cursor += len(part)
                 if self.cursor == len(clip):
@@ -202,7 +215,8 @@ class WaveOutput:
             raise c.WinError(c.get_last_error())
         format_ = WaveFormat(1, 1, RATE, RATE * FRAME_BYTES, FRAME_BYTES, 16, 0)
         try:
-            checked(winmm.waveOutOpen(c.byref(self.handle), 0xFFFFFFFF, c.byref(format_), self.signal, 0, 0x50000))
+            checked(winmm.waveOutOpen(c.byref(self.handle), WAVE_MAPPER, c.byref(format_),
+                                      self.signal, 0, CALLBACK_EVENT))
             for _ in range(3):
                 raw = c.create_string_buffer(self.chunk_frames * FRAME_BYTES)
                 header = WaveHeader(c.addressof(raw), len(raw))
@@ -225,12 +239,12 @@ class WaveOutput:
     def service(self):
         try:
             while not self.stop_event.is_set():
-                if kernel.WaitForSingleObject(self.signal, 50) == 0xFFFFFFFF:
+                if kernel.WaitForSingleObject(self.signal, 50) == WAIT_FAILED:
                     raise c.WinError(c.get_last_error())
                 if self.stop_event.is_set():
                     break
                 for raw, header in self.buffers:
-                    if header.flags & 1:  # WHDR_DONE
+                    if header.flags & WHDR_DONE:
                         self.queue(raw, header)
         except OSError as error:
             self.error = error
@@ -238,13 +252,13 @@ class WaveOutput:
     def frames_played(self):
         if self.error is not None:
             raise self.error
-        position = Position(2)  # TIME_SAMPLES
+        position = Position(TIME_SAMPLES)
         checked(winmm.waveOutGetPosition(self.handle, c.byref(position), c.sizeof(position)))
-        if position.kind == 4:  # TIME_BYTES
+        if position.kind == TIME_BYTES:
             return position.value // FRAME_BYTES
-        if position.kind == 1:  # TIME_MS
+        if position.kind == TIME_MS:
             return position.value * RATE // 1000
-        if position.kind != 2:
+        if position.kind != TIME_SAMPLES:
             raise OSError("오디오 장치의 재생 시간을 확인할 수 없습니다.")
         return position.value
 
